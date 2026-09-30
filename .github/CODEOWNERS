@@ -1,0 +1,9 @@
+# CODEOWNERS — Oatmeal AI / Oatmeal Farm Network
+# Filled 14 Sep 2026 from branching plan §1.1.
+# GitHub auto-requests reviews from these users on matching paths.
+
+.github/workflows/ @dbanoth @OatmealAIJohn
+saige/ @dbanoth @OatmealAIJohn
+oatsense/ @dbanoth @OatmealAIJohn
+livestock/ @dbanoth @OatmealAIJohn
+* @OatmealAIJohn @dbanoth

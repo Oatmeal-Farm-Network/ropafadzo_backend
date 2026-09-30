@@ -1,0 +1,144 @@
+name: Deploy Saige Backend to Cloud Run
+
+# main → saige-backend in animated-flare-421518 (Oatmeal AI) only.
+# Official Saige prod Cloud Run is saige-backend. Staging/testing stay
+# oatmeal-saige-staging / oatmeal-saige-testing in oatmeal-farm-staging.
+# Merge to main deploys saige-backend. Do not deploy Saige into oatmeal-farm-staging from main.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "saige/**"
+      - ".github/workflows/deploy-saige.yml"
+  workflow_dispatch:
+
+env:
+  PROJECT_ID: ${{ secrets.PROD_GCP_PROJECT_ID || secrets.GCP_PROJECT_ID || 'animated-flare-421518' }}
+  GAR_LOCATION: us-central1
+  GAR_REPOSITORY: docker-repo
+  REGION: us-central1
+  SERVICE_NAME: saige-backend
+  MAIN_SERVICE_NAME: oatmealfarmnewtorkbackend
+
+jobs:
+  check-prod-auth:
+    runs-on: ubuntu-latest
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+      use_wif: ${{ steps.check.outputs.use_wif }}
+    steps:
+      - name: Check prod WIF or GCP_SA_KEY
+        id: check
+        shell: bash
+        env:
+          HAS_WIF_PROVIDER: ${{ secrets.PROD_GCP_WORKLOAD_IDENTITY_PROVIDER != '' || secrets.PROD_GCP_WIF_PROVIDER != '' }}
+          HAS_WIF_SA: ${{ secrets.PROD_GCP_SERVICE_ACCOUNT != '' }}
+          HAS_SA_KEY: ${{ secrets.GCP_SA_KEY != '' }}
+        run: |
+          if [ "$HAS_WIF_PROVIDER" = "true" ] && [ "$HAS_WIF_SA" = "true" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "use_wif=true" >> "$GITHUB_OUTPUT"
+          elif [ "$HAS_SA_KEY" = "true" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "use_wif=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "use_wif=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No prod WIF or GCP_SA_KEY. Skipping Saige production deploy."
+          fi
+
+  deploy:
+    needs: check-prod-auth
+    if: needs.check-prod-auth.outputs.configured == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Require Oatmeal AI project
+        shell: bash
+        run: |
+          project="${{ env.PROJECT_ID }}"
+          if [ "$project" != "animated-flare-421518" ]; then
+            echo "::error::Saige prod must use project animated-flare-421518 (Oatmeal AI). Got: $project"
+            echo "Never deploy saige-backend into oatmeal-farm-staging from main."
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud (WIF)
+        if: needs.check-prod-auth.outputs.use_wif == 'true'
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.PROD_GCP_WORKLOAD_IDENTITY_PROVIDER || secrets.PROD_GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.PROD_GCP_SERVICE_ACCOUNT }}
+
+      - name: Authenticate to Google Cloud (SA key)
+        if: needs.check-prod-auth.outputs.use_wif != 'true'
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Resolve SECRET_KEY (must match main backend)
+        id: secret_key
+        run: |
+          SECRET_KEY="${{ secrets.SECRET_KEY }}"
+          if [ -z "$SECRET_KEY" ]; then
+            echo "GitHub SECRET_KEY secret empty ΓÇö fetching from main backend..."
+            SECRET_KEY=$(gcloud run services describe "$MAIN_SERVICE_NAME" \
+              --region "$REGION" --project "$PROJECT_ID" \
+              --format="value(spec.template.spec.containers[0].env.filter(name=SECRET_KEY).extract(value).flatten())")
+          fi
+          if [ -z "$SECRET_KEY" ]; then
+            echo "ERROR: SECRET_KEY is not configured on saige or main backend."
+            exit 1
+          fi
+          echo "SECRET_KEY resolved (length ${#SECRET_KEY})"
+          echo "value=$SECRET_KEY" >> "$GITHUB_OUTPUT"
+
+      - name: Configure Docker for GAR
+        run: gcloud auth configure-docker $GAR_LOCATION-docker.pkg.dev --quiet
+
+      - name: Build Docker image
+        run: |
+          docker build -f saige/Dockerfile.backend \
+            -t $GAR_LOCATION-docker.pkg.dev/$PROJECT_ID/$GAR_REPOSITORY/$SERVICE_NAME:$GITHUB_SHA \
+            -t $GAR_LOCATION-docker.pkg.dev/$PROJECT_ID/$GAR_REPOSITORY/$SERVICE_NAME:latest \
+            ./saige
+
+      - name: Push Docker image
+        run: |
+          docker push $GAR_LOCATION-docker.pkg.dev/$PROJECT_ID/$GAR_REPOSITORY/$SERVICE_NAME:$GITHUB_SHA
+          docker push $GAR_LOCATION-docker.pkg.dev/$PROJECT_ID/$GAR_REPOSITORY/$SERVICE_NAME:latest
+
+      - name: Deploy to Cloud Run
+        env:
+          SECRET_KEY: ${{ steps.secret_key.outputs.value }}
+        run: |
+          gcloud run deploy $SERVICE_NAME \
+            --image $GAR_LOCATION-docker.pkg.dev/$PROJECT_ID/$GAR_REPOSITORY/$SERVICE_NAME:$GITHUB_SHA \
+            --project $PROJECT_ID \
+            --region $REGION \
+            --platform managed \
+            --allow-unauthenticated \
+            --port 8000 \
+            --memory 512Mi \
+            --cpu 1 \
+            --min-instances 0 \
+            --max-instances 10 \
+            --update-env-vars "GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=$REGION,ALLOW_ALL_ORIGINS=true,GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }},FRONTEND_URL=https://oatmealfarmnetwork-802455386518.us-central1.run.app,SECRET_KEY=$SECRET_KEY,REDIS_ENABLED=false"
+
+      - name: Show deployed URL
+        run: |
+          URL=$(gcloud run services describe $SERVICE_NAME \
+            --project $PROJECT_ID \
+            --region $REGION --format 'value(status.url)')
+          echo "Saige backend deployed at: $URL"

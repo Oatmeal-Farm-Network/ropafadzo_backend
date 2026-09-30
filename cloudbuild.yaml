@@ -1,0 +1,19 @@
+steps:
+  # Build Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/animated-flare-421518/cloud-run-source-deploy/oatmealfarmnetworkbackend/oatmealfarmnewtorkbackend:latest'
+      - '.'
+
+  # Push image to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'us-central1-docker.pkg.dev/animated-flare-421518/cloud-run-source-deploy/oatmealfarmnetworkbackend/oatmealfarmnewtorkbackend:latest'
+
+  # Deploy step removed — deploy manually via Cloud Run console or gcloud CLI
+
+images:
+  - 'us-central1-docker.pkg.dev/animated-flare-421518/cloud-run-source-deploy/oatmealfarmnetworkbackend/oatmealfarmnewtorkbackend:latest'
